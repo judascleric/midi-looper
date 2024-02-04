@@ -9,6 +9,7 @@ readme = "README.md"
 python = "^3.11"
 alsa-midi = "^1.0.2"
 dataclasses-json = "^0.6.4"
+gpiozero = "^2.0"
 
 [tool.poetry.group.dev.dependencies]
 pylint = "^3.0.3"

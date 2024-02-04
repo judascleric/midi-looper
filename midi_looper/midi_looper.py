@@ -27,21 +27,20 @@ from alsa_midi import (
     Port,
     READ_PORT,
     WRITE_PORT,
-    NOTEON,
-    NOTEOFF,
+    EventType,
 )
 from gpiozero import Button
 
-from config import read_config, DEFAULT_CONFIG_PATH
+from midi_looper.config import read_config, DEFAULT_CONFIG_PATH
 
 playrec_btn = Button(16)
 stop_btn = Button(18)
 
 
 class State(Enum):
-    Stop = 0
-    Record = 1
-    Play = 2
+    STOP = 0
+    RECORD = 1
+    PLAY = 2
 
 
 @dataclass
@@ -59,8 +58,9 @@ class AllInputs:
 
 
 @dataclass
+# pylint: disable=too-many-instance-attributes
 class LooperState:
-    state: State = State.Stop
+    state: State = State.STOP
     prev: float = field(default_factory=time.time)
     btn: AllInputs
     rec: List[Event] = field(default_factory=list)
@@ -68,6 +68,7 @@ class LooperState:
     rec_port: Port
     play_port: Port
     rec_gen: AsyncGenerator[Event]
+    play_coro: Awaitable[None]
 
 
 EVENT_LOOP_SEC = 0.03  # 30ms / 33Hz
@@ -75,12 +76,12 @@ EVENT_LOOP_SEC = 0.03  # 30ms / 33Hz
 MAX_RECORD_TIME_SEC = 60 * 5
 MAX_RECORD_IDLE_TIMEOUT_SEC = 10
 REC_EVENT_TYPE_FILTER = [
-    NOTEON,
-    NOTEOFF,
+    EventType.NOTEON,
+    EventType.NOTEOFF,
 ]
 CC_ALL_NOTES_OFF = 123
 
-
+# pylint: disable=too-many-branches,too-many-statements
 async def main():
     config_path = os.environ.get("ACM_CONFIG_PATH", DEFAULT_CONFIG_PATH)
     config = read_config(config_path)
@@ -113,49 +114,47 @@ async def main():
     done, _ = await asyncio.sleep(0)
     while True:
         now = time.time()
-        next = now + EVENT_LOOP_SEC
+        next_time = now + EVENT_LOOP_SEC
         state.btn = get_button_states(state.btn)
-        if state.state == State.Stop:
+        if state.state == State.STOP:
             if state.btn.stop.pressed:
                 print("Stop -> Reset")
                 await panic(state.client, state.play_port)
                 del state.rec[:]
-                state.rec = list()
-                state.state == State.Stop
-            elif state.btn.play.pressed:
+                state.rec = []
+                state.state = State.STOP
+            elif state.btn.playrec.pressed:
                 if len(state.rec) == 0:
                     print("Stop -> Record")
-                    state.state = State.Record
+                    state.state = State.RECORD
                     state.rec_gen = record(state, now + MAX_RECORD_TIME_SEC)
                 else:
                     print("Stop -> Play")
                     state.play_coro = play(state)
-                    state.state = State.Play
-        elif state.state == State.Record:
+                    state.state = State.PLAY
+        elif state.state == State.RECORD:
             if state.btn.stop.pressed:
                 print("Record -> Stop")
                 await state.rec_gen.aclose()
                 await panic(state.client, state.play_port)
-                state.state == State.Stop
-            elif state.btn.play.pressed:
+                state.state = State.STOP
+            elif state.btn.playrec.pressed:
                 print("Record -> Play")
-                state.rec = [
-                    event for event in await state.rec_gen
-                ] + create_panic_events()
+                state.rec = list(await state.rec_gen) + create_panic_events()
                 state.play_coro = play(state)
-                state.state = State.Play
-        elif state.state == State.Play:
-            if state.btn.play.pressed or state.btn.stop.pressed:
+                state.state = State.PLAY
+        elif state.state == State.PLAY:
+            if state.btn.playrec.pressed or state.btn.stop.pressed:
                 print("Play -> Stop")
                 await state.play_coro.cancel()
                 await panic(state.client, state.play_port)
-                state.state == State.Stop
+                state.state = State.STOP
             elif state.play_coro in done:
                 print("Play Loop")
                 # loop if done
                 state.play_coro = play(state)
 
-        done, _ = await asyncio.sleep(next - time.time())
+        done, _ = await asyncio.sleep(next_time - time.time())
 
 
 async def panic(client: SequencerClient, dest_port: Port):

@@ -4,7 +4,6 @@ config - data structures and methods for reading and writing connect configs
 
 from dataclasses import dataclass, field
 import os
-import subprocess
 from typing import List
 
 from dataclasses_json import dataclass_json
