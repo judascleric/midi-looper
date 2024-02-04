@@ -1,0 +1,9 @@
+[FORMAT]
+max-line-length=120
+
+[OPTIONS]
+good-names=i,f,d,e,_,s3,ap,bp,fp,id
+
+[MESSAGES CONTROL]
+disable=logging-fstring-interpolation,missing-class-docstring,missing-function-docstring,duplicate-code,unspecified-encoding
+

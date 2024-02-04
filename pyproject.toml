@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "midi-looper"
+version = "0.1.0"
+description = "simple one-button MIDI looper"
+authors = ["Ryan Prince <judascleric@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+alsa-midi = "^1.0.2"
+
+[tool.poetry.group.dev.dependencies]
+pylint = "^3.0.3"
+black = "^24.1.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
