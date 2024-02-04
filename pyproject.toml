@@ -8,6 +8,7 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3.11"
 alsa-midi = "^1.0.2"
+dataclasses-json = "^0.6.4"
 
 [tool.poetry.group.dev.dependencies]
 pylint = "^3.0.3"
