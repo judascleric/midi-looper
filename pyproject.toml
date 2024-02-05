@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "simple one-button MIDI looper"
 authors = ["Ryan Prince <judascleric@gmail.com>"]
 readme = "README.md"
+packages = [{include = "midi_looper"}]
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -18,3 +19,6 @@ black = "^24.1.1"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+midi-looper = "midi_looper.midi_looper:main_sync"

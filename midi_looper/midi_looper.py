@@ -18,23 +18,24 @@ from enum import Enum
 import os
 import sys
 import time
-from typing import AsyncGenerator, Awaitable, List
+from typing import Awaitable, List, Optional
 
 from alsa_midi import (
     Event,
-    SequencerClient,
+    AsyncSequencerClient,
     ControlChangeEvent,
     Port,
     READ_PORT,
     WRITE_PORT,
     EventType,
 )
-from gpiozero import Button
+from gpiozero import Button, LED
 
 from midi_looper.config import read_config, DEFAULT_CONFIG_PATH
 
-playrec_btn = Button(16)
-stop_btn = Button(18)
+playrec_btn = Button(2)
+stop_btn = Button(3)
+indicator_led = LED(17)
 
 
 class State(Enum):
@@ -53,25 +54,29 @@ class ButtonState:
 
 @dataclass
 class AllInputs:
-    playrec: ButtonState
-    stop: ButtonState
+    playrec: ButtonState = field(default_factory=ButtonState)
+    stop: ButtonState = field(default_factory=ButtonState)
 
 
 @dataclass
 # pylint: disable=too-many-instance-attributes
 class LooperState:
-    state: State = State.STOP
-    prev: float = field(default_factory=time.time)
-    btn: AllInputs
-    rec: List[Event] = field(default_factory=list)
-    client: SequencerClient
+    client: AsyncSequencerClient
     rec_port: Port
     play_port: Port
-    rec_gen: AsyncGenerator[Event]
-    play_coro: Awaitable[None]
+    state: State = State.STOP
+    prev: float = field(default_factory=time.time)
+    rec_queue: asyncio.Queue[Event] = field(default_factory=asyncio.Queue)
+    rec: List[Event] = field(default_factory=list)
+    btn: AllInputs = field(default_factory=AllInputs)
+    rec_task: Optional[Awaitable[None]] = None
+    play_task: Optional[Awaitable[None]] = None
 
 
 EVENT_LOOP_SEC = 0.03  # 30ms / 33Hz
+
+RECORD_BLINK_TIME = 0.1
+PLAY_BLINK_TIME = 0.75
 
 MAX_RECORD_TIME_SEC = 60 * 5
 MAX_RECORD_IDLE_TIMEOUT_SEC = 10
@@ -81,12 +86,15 @@ REC_EVENT_TYPE_FILTER = [
 ]
 CC_ALL_NOTES_OFF = 123
 
+def main_sync():
+    asyncio.run(main())
+
 # pylint: disable=too-many-branches,too-many-statements
 async def main():
     config_path = os.environ.get("ACM_CONFIG_PATH", DEFAULT_CONFIG_PATH)
     config = read_config(config_path)
 
-    client = SequencerClient("midi-looper")
+    client = AsyncSequencerClient("midi-looper")
     src_port, dest_port = get_ports(client, config)
     if src_port is None or dest_port is None:
         print(
@@ -94,6 +102,8 @@ async def main():
             file=sys.stderr,
         )
         sys.exit(1)
+    print(f"Using src_port = {src_port}")
+    print(f"Using dest_port = {dest_port}")
 
     rec_queue = client.create_queue("recqueue")
     rec_port = client.create_port(
@@ -111,7 +121,7 @@ async def main():
     play_port.connect_to(dest_port)
 
     state = LooperState(client=client, rec_port=rec_port, play_port=play_port)
-    done, _ = await asyncio.sleep(0)
+    done = []
     while True:
         now = time.time()
         next_time = now + EVENT_LOOP_SEC
@@ -123,41 +133,71 @@ async def main():
                 del state.rec[:]
                 state.rec = []
                 state.state = State.STOP
+                indicator_led.off()
             elif state.btn.playrec.pressed:
                 if len(state.rec) == 0:
                     print("Stop -> Record")
                     state.state = State.RECORD
-                    state.rec_gen = record(state, now + MAX_RECORD_TIME_SEC)
+                    state.rec_task = asyncio.create_task(record(state, now + MAX_RECORD_TIME_SEC))
+                    indicator_led.blink(on_time=RECORD_BLINK_TIME, off_time=RECORD_BLINK_TIME)
                 else:
                     print("Stop -> Play")
-                    state.play_coro = play(state)
+                    state.play_task = asyncio.create_task(play(state))
                     state.state = State.PLAY
+                    indicator_led.blink(on_time=PLAY_BLINK_TIME, off_time=PLAY_BLINK_TIME)
         elif state.state == State.RECORD:
+            # flush recording queue
+            for _ in range(state.rec_queue.qsize()):
+                state.rec.append(state.rec_queue.get_nowait())
             if state.btn.stop.pressed:
                 print("Record -> Stop")
-                await state.rec_gen.aclose()
+                state.rec_task.cancel()
+                state.rec_task = None
                 await panic(state.client, state.play_port)
                 state.state = State.STOP
+                del state.rec[:]
+                state.rec = []
+                indicator_led.off()
             elif state.btn.playrec.pressed:
                 print("Record -> Play")
-                state.rec = list(await state.rec_gen) + create_panic_events()
-                state.play_coro = play(state)
+                state.rec_task.cancel()
+                state.rec_task = None
+                state.rec += create_panic_events()
+                print(len(state.rec))
+                state.play_task = asyncio.create_task(play(state))
                 state.state = State.PLAY
+                indicator_led.blink(on_time=PLAY_BLINK_TIME, off_time=PLAY_BLINK_TIME)
         elif state.state == State.PLAY:
             if state.btn.playrec.pressed or state.btn.stop.pressed:
                 print("Play -> Stop")
-                await state.play_coro.cancel()
+                state.play_task.cancel()
+                state.play_task = None
                 await panic(state.client, state.play_port)
                 state.state = State.STOP
-            elif state.play_coro in done:
+                indicator_led.on()
+            elif state.play_task and state.play_task in done:
                 print("Play Loop")
-                # loop if done
-                state.play_coro = play(state)
+                state.play_task.cancel()
+                state.play_task = None
+                await panic(state.client, state.play_port)
+                state.state = State.STOP
+                indicator_led.on()
+                # # loop if done
+                # print(len(state.rec))
+                # # state.play_task = asyncio.create_task(play(state))
+                # indicator_led.blink(on_time=PLAY_BLINK_TIME, off_time=PLAY_BLINK_TIME)
 
-        done, _ = await asyncio.sleep(next_time - time.time())
+        sleep_timeout=next_time - time.time()
+        active_tasks = [task for task in [state.rec_task, state.play_task] if task]
+        done = []
+        if len(active_tasks) > 0:
+            done, _ = await asyncio.wait(active_tasks, timeout=sleep_timeout)
+        else:
+            await asyncio.sleep(sleep_timeout)
 
 
-async def panic(client: SequencerClient, dest_port: Port):
+
+async def panic(client: AsyncSequencerClient, dest_port: Port):
     """stop notes on dest port on all channels"""
     for event in create_panic_events():
         await client.event_output(event, port=dest_port)
@@ -180,15 +220,15 @@ def get_button_states(old: AllInputs) -> AllInputs:
     return AllInputs(playrec=playrec_new, stop=stop_new)
 
 
-async def record(state: LooperState, rec_timeout: float) -> AsyncGenerator[Event, None]:
+async def record(state: LooperState, rec_timeout: float):
     while time.time() < rec_timeout:
         event = await state.client.event_input(timeout=MAX_RECORD_IDLE_TIMEOUT_SEC)
         if event is not None and event.event in REC_EVENT_TYPE_FILTER:
             print(f"record event - {repr(event)}")
-            yield event
+            state.rec_queue.put(event)
 
 
-async def play(state: LooperState) -> Awaitable[None]:
+async def play(state: LooperState):
     for event in state.rec:
         await state.client.event_output(event, port=state.play_port)
     await state.client.drain_output()
@@ -215,5 +255,4 @@ def get_ports(client, config):
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    main_sync()
